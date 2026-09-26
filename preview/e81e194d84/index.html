@@ -44,6 +44,13 @@ h2{font-size:32px;font-weight:700;letter-spacing:-.03em;line-height:1.25;
 #lb .nav{position:absolute;top:50%;transform:translateY(-50%);font-size:34px;padding:16px;
  color:rgba(255,255,255,.55)}
 #lb .prev{left:0}#lb .next{right:0}
+/* ★핀치 확대 — 260926 추가. 확대 중에는 화살표를 숨기고 스와이프도 막는다. */
+#lb img{transform-origin:0 0;will-change:transform;touch-action:none}
+#lb.zoom .nav{display:none}
+#lb .zt{position:absolute;left:50%;bottom:22px;transform:translateX(-50%);font-size:12px;
+ background:rgba(0,0,0,.55);border-radius:14px;padding:5px 12px;color:rgba(255,255,255,.8);
+ pointer-events:none;opacity:0;transition:opacity .25s}
+#lb .zt.on{opacity:1}
 .note{color:var(--dim);font-size:12px;margin:26px 16px 0;padding-top:14px;border-top:1px solid var(--line)}
 /* ?pick 모드 */
 body.pick .cell{outline:2px solid transparent}
@@ -77,6 +84,7 @@ body.pick #pickbar{display:flex;gap:10px;align-items:center;justify-content:spac
   <div class="stage" id="stage"></div>
   <div class="nav prev" id="prev">‹</div>
   <div class="nav next" id="next">›</div>
+  <div class="zt" id="zt"></div>
 </div>
 
 <div id="pickbar">
@@ -98,6 +106,7 @@ function show(i){
     ? `<video src="videos/${it.id}.mp4" controls autoplay playsinline poster="posters/${it.id}.jpg"></video>`
     : `<img src="photos/${it.id}.jpg" alt="">`;
   pos.textContent = `${idx + 1} / ${items.length}  ${it.cap || ''}`;
+  fit();                       // ★장을 넘기면 확대 상태를 초기화한다
 }
 function open_(i){ if (pick) return; lb.classList.add('on'); show(i);
   document.body.style.overflow = 'hidden'; }
@@ -116,12 +125,101 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft') show(idx - 1);
   if (e.key === 'ArrowRight') show(idx + 1);
 });
-let sx = 0;
-lb.addEventListener('touchstart', e => sx = e.touches[0].clientX, {passive:true});
+/* ───────── 핀치 확대·이동 ─────────
+   ★브라우저 기본 확대에 맡기지 않는다 — 고정 오버레이 안에서는 페이지째 늘어나
+     닫기 버튼이 화면 밖으로 나간다. 그래서 ★이미지에만 transform 을 준다.
+   ★확대 중에는 스와이프를 막는다 (사진을 끌어 보는 중에 다음 장으로 넘어가면 안 된다) */
+let S = 1, TX = 0, TY = 0, img = null, base = null;
+const zt = document.getElementById('zt');
+function tip(t){ zt.textContent = t; zt.classList.add('on');
+  clearTimeout(tip._); tip._ = setTimeout(() => zt.classList.remove('on'), 900); }
+function fit(){
+  img = stage.querySelector('img'); S = 1; TX = TY = 0;
+  lb.classList.remove('zoom');
+  base = null;
+  if (img) { img.style.transform = ''; if (img.complete) measure(); else img.onload = measure; }
+}
+function measure(){
+  /* ★offsetWidth/Height 는 transform 의 영향을 안 받는다 — 확대 중에 재도 원래 크기가 나온다.
+     ★getBoundingClientRect 로 재면 ★확대가 반영된 값이 섞여 기준이 어긋난다
+     (260926 실사고: 더블탭으로 되돌려도 사진이 26px 틀어져 있었다). */
+  if (!img) return;
+  const w = img.offsetWidth, h = img.offsetHeight;
+  if (!w || !h) return;
+  base = {w: w, h: h, l: (innerWidth - w) / 2, t: (innerHeight - h) / 2};
+}
+function rect(){ if (!base) measure(); return base || {w:1,h:1,l:0,t:0}; }
+function clamp(){
+  const b = rect(), vw = innerWidth, vh = innerHeight;
+  const w = b.w * S, h = b.h * S, l = b.l, t = b.t;
+  if (w <= vw) TX = (vw - w) / 2 - l; else TX = Math.min(-l, Math.max(vw - w - l, TX));
+  if (h <= vh) TY = (vh - h) / 2 - t; else TY = Math.min(-t, Math.max(vh - h - t, TY));
+}
+function apply(){
+  if (!img) return;
+  clamp();
+  img.style.transform = `translate(${TX}px,${TY}px) scale(${S})`;
+  lb.classList.toggle('zoom', S > 1.02);
+}
+function zoomAt(ns, cx, cy){
+  if (!img) return;
+  ns = Math.max(1, Math.min(5, ns));
+  const k = ns / S;
+  TX = cx - (cx - TX) * k; TY = cy - (cy - TY) * k; S = ns;
+  apply();
+}
+let sx = 0, sy = 0, moved = false, pinch = 0, pcx = 0, pcy = 0, lastTap = 0, lastTap_x = -999, lastTap_y = -999;
+function dist(t){ return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY); }
+lb.addEventListener('touchstart', e => {
+  if (!img) img = stage.querySelector('img');
+  if (e.touches.length === 2) {
+    pinch = dist(e.touches);
+    pcx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+    pcy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+  } else {
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; moved = false;
+    /* ★버튼 위에서는 더블탭 판정을 아예 하지 않는다.
+       (260926 실사고: 직전 탭 ★300ms 안에 × 를 누르면 더블탭으로 오인돼
+        preventDefault 가 걸려 ★닫기가 먹히지 않았다) */
+    if (e.target.closest('.bar, .nav')) { lastTap = 0; return; }
+    const now = Date.now();
+    const near = Math.hypot(sx - lastTap_x, sy - lastTap_y) < 40;  // ★같은 자리여야 더블탭
+    if (now - lastTap < 300 && near && img) {   // ★더블탭 = 2.5배 / 원래대로
+      zoomAt(S > 1.02 ? 1 : 2.5, sx, sy);
+      tip(S > 1.02 ? '확대 ' + S.toFixed(1) + '배' : '원래 크기');
+      lastTap = 0; e.preventDefault();
+    } else { lastTap = now; lastTap_x = sx; lastTap_y = sy; }
+  }
+}, {passive:false});
+lb.addEventListener('touchmove', e => {
+  if (e.touches.length === 2 && pinch && img) {
+    e.preventDefault();
+    zoomAt(S * (dist(e.touches) / pinch), pcx, pcy);
+    pinch = dist(e.touches);
+  } else if (e.touches.length === 1 && S > 1.02 && img) {
+    e.preventDefault();                          // ★확대 중 한 손가락 = 이동
+    TX += e.touches[0].clientX - sx; TY += e.touches[0].clientY - sy;
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; moved = true; apply();
+  }
+}, {passive:false});
 lb.addEventListener('touchend', e => {
+  if (pinch) { pinch = 0; if (S < 1.02) { S = 1; TX = TY = 0; apply(); } return; }
+  if (S > 1.02 || moved) return;                 // ★확대 중에는 안 넘긴다
   const d = e.changedTouches[0].clientX - sx;
-  if (Math.abs(d) > 50) show(idx + (d < 0 ? 1 : -1));
+  const dy = Math.abs(e.changedTouches[0].clientY - sy);
+  if (Math.abs(d) > 50 && dy < 80) show(idx + (d < 0 ? 1 : -1));
 }, {passive:true});
+/* PC — 휠·더블클릭 */
+lb.addEventListener('wheel', e => {
+  if (!stage.querySelector('img')) return;
+  e.preventDefault(); img = stage.querySelector('img');
+  zoomAt(S * (e.deltaY < 0 ? 1.15 : 1 / 1.15), e.clientX, e.clientY);
+}, {passive:false});
+lb.addEventListener('dblclick', e => {
+  if (!stage.querySelector('img')) return;
+  img = stage.querySelector('img');
+  zoomAt(S > 1.02 ? 1 : 2.5, e.clientX, e.clientY);
+});
 function count(){
   const out = [...document.querySelectorAll('.cell.out')].map(e => e.dataset.id);
   document.getElementById('pcount').textContent = `뺄 항목 ${out.length}개`;
